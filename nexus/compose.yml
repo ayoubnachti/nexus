@@ -1,0 +1,32 @@
+# Nexus Repository (Community Edition): Maven + Docker artifact hub.
+# Local:   docker compose -f nexus/compose.yml up -d
+#          UI + Maven on http://localhost:8090, Docker registry on localhost:8082
+# Server:  docker compose -f nexus/compose.yml -f nexus/compose.server.yml up -d
+# Decisions: docs/adr/001-nexus.md
+name: nexus
+
+services:
+  nexus:
+    image: sonatype/nexus3:3.98.1
+    container_name: nexus
+    restart: unless-stopped
+    environment:
+      INSTALL4J_ADD_VM_PARAMS: >-
+        -Xms2g -Xmx2g -XX:MaxDirectMemorySize=1g
+        -Djava.util.prefs.userRoot=/nexus-data/javaprefs
+    ports:
+      - "127.0.0.1:8090:8081"   # UI + Maven (8081 on the host is already Jenkins)
+      - "127.0.0.1:8082:8082"   # Docker connector of the docker-hosted repo
+    volumes:
+      - nexus_data:/nexus-data  # everything: config, users, published artifacts
+    mem_limit: 4g
+    stop_grace_period: 2m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/service/rest/v1/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 3m
+
+volumes:
+  nexus_data:
