@@ -1,0 +1,13 @@
+# Server-only additions, layered on top of compose.yml:
+#   docker compose -f nexus/compose.yml -f nexus/compose.server.yml up -d
+# Caddy reaches Nexus by name on the shared "web" network
+# (nexus.ayoubnachti.dev -> nexus:8081, registry.ayoubnachti.dev -> nexus:8082),
+# so no port is published on the host.
+services:
+  nexus:
+    ports: !reset []
+    networks: [default, web]
+
+networks:
+  web:
+    external: true
