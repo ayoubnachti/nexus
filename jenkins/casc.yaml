@@ -93,6 +93,13 @@ credentials:
               id: sonar-token
               description: SonarQube analysis token
               secret: "${SONAR_TOKEN}"
+          # Nexus CI user: resolves dependencies, publishes JARs and images (no admin, no delete)
+          - usernamePassword:
+              id: "nexus-ci"
+              scope: GLOBAL
+              username: "${NEXUS_CI_USER}"
+              password: "${NEXUS_CI_PASSWORD}"
+              description: "Nexus ci-deployer"
 
 unclassified:
   location:

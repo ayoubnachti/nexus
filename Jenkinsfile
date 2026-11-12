@@ -19,6 +19,7 @@ pipeline {
     COMPOSE = 'docker compose -p ecommerce -f compose.yml'
     BACKEND_SVCS = 'discovery-server api-gateway user-service product-service media-service order-service cart-service'
     DEPLOY       = 'true'
+    NEXUS_URL    = 'https://nexus.ayoubnachti.dev'
   }
 
   stages {
@@ -49,15 +50,19 @@ pipeline {
           stages {
             stage('Backend tests') {
               steps {
-                sh '''
-                  for svc in $BACKEND_SVCS; do
-                    echo "=== Testing $svc"
-                    (cd backend/$svc && MONGODB_URI="mongodb://mongo-test:27017/buy-02-$svc-test" ./mvnw -B -ntp clean \
-                      org.jacoco:jacoco-maven-plugin:0.8.15:prepare-agent \
-                      test \
-                      org.jacoco:jacoco-maven-plugin:0.8.15:report)
-                  done
-                '''
+                withCredentials([usernamePassword(credentialsId: 'nexus-ci',
+                                                  usernameVariable: 'NEXUS_USER',
+                                                  passwordVariable: 'NEXUS_PASSWORD')]) {
+                  sh '''
+                    for svc in $BACKEND_SVCS; do
+                      echo "=== Testing $svc"
+                      (cd backend/$svc && MONGODB_URI="mongodb://mongo-test:27017/buy-02-$svc-test" ./mvnw -s ../../settings.xml -B -ntp clean \
+                        org.jacoco:jacoco-maven-plugin:0.8.15:prepare-agent \
+                        test \
+                        org.jacoco:jacoco-maven-plugin:0.8.15:report)
+                    done
+                  '''
+                }
               }
               post {
                 always {
@@ -69,20 +74,23 @@ pipeline {
             stage('Backend analysis') {
               steps {
                 fetchTargetBranch()
-                withSonarQubeEnv('sonarqube') {
-                  // qualitygate.wait: the scanner exits non-zero if the quality gate fails
-                  sh '''
-                    for svc in $BACKEND_SVCS; do
-                      echo "=== Analysing $svc"
-                      (cd backend/$svc && ./mvnw -B -ntp \
-                        org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211:sonar \
-                        -Dsonar.projectKey=buy-02-$svc \
-                        "-Dsonar.projectName=buy-02 $svc" \
-                        -Dsonar.qualitygate.wait=true \
-                        -Dsonar.qualitygate.timeout=300 \
-                        $SONAR_ARGS)
-                    done
-                  '''
+                withCredentials([usernamePassword(credentialsId: 'nexus-ci',
+                                                  usernameVariable: 'NEXUS_USER',
+                                                  passwordVariable: 'NEXUS_PASSWORD')]) {
+                  withSonarQubeEnv('sonarqube') {
+                    sh '''
+                      for svc in $BACKEND_SVCS; do
+                        echo "=== Analysing $svc"
+                        (cd backend/$svc && ./mvnw -s ../../settings.xml -B -ntp \
+                          org.sonarsource.scanner.maven:sonar-maven-plugin:5.8.0.7211:sonar \
+                          -Dsonar.projectKey=buy-02-$svc \
+                          "-Dsonar.projectName=buy-02 $svc" \
+                          -Dsonar.qualitygate.wait=true \
+                          -Dsonar.qualitygate.timeout=300 \
+                          $SONAR_ARGS)
+                      done
+                    '''
+                  }
                 }
               }
             }
