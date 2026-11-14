@@ -26,6 +26,7 @@ GitHub ──webhook (push, PR)──► Jenkins controller (0 executors, config
 - **Configuration as code:** `jenkins/casc.yaml` creates the admin user, security, both agents, credentials, the email settings and the SonarQube server connection. No setup wizard.
 - **Secrets** are never in git. They live in `jenkins/.env` (git-ignored) and become Jenkins credentials at startup.
 - **Multi-arch images only**, so the same files run on the arm64 server and on x86 laptops.
+- **Nexus is the artifact hub** (`https://nexus.ayoubnachti.dev`, own compose project `nexus/`): every Maven build in the pipeline resolves its dependencies through it (`-s settings.xml`, user `ci-deployer` from the `nexus-ci` credential), and every release of `main` is published to it — JARs in `maven-releases`, images in `registry.ayoubnachti.dev`. Details: `docs/adr/001-nexus.md`.
 
 ## Pipeline (`Jenkinsfile`)
 
@@ -34,11 +35,12 @@ The job is a **Multibranch Pipeline** with the GitHub Branch Source: it builds `
 | Stage | Agent | What it does |
 |---|---|---|
 | **Prepare** | — | Tells SonarQube whether this is a PR (`sonar.pullrequest.*`) or a branch analysis |
-| **Backend tests** / **Frontend tests** | backend / frontend, **in parallel** | Backend: `./mvnw clean test` with JaCoCo coverage for the 7 Spring services (with a throwaway MongoDB). Frontend: `npm ci` + `ng test --coverage` (Vitest). JUnit results are published. |
+| **Backend tests** / **Frontend tests** | backend / frontend, **in parallel** | Backend: `./mvnw -s settings.xml clean test` (dependencies through Nexus) with JaCoCo coverage for the 7 Spring services (with a throwaway MongoDB). Frontend: `npm ci` + `ng test --coverage` (Vitest). JUnit results are published. |
 | **Backend analysis** / **Frontend analysis** | same agent and workspace as the tests | SonarQube analysis per service (8 projects). `sonar.qualitygate.wait=true`: the scanner fails the stage if the **quality gate** fails. |
-| **Build images** | backend | `docker compose build`, images tagged with the build number — **`main` only** |
+| **Build images** | backend | `./mvnw -s settings.xml clean package -Drevision=1.0.<build#>` for the 7 services (dependencies through Nexus), then `docker compose build`: the backend images copy those JARs. Images tagged with the build number — **`main` only** |
 | **Deploy** | backend | `docker compose up -d --wait`: replaces the live containers, succeeds only once every one reports healthy — **`main` only** |
 | **E2E tests** | frontend | Playwright drives a real browser against the site `Deploy` just put live (`https://shop.ayoubnachti.dev`): register, log in, search, add to cart, check out on delivery, see the order. Runs right after `Deploy`, same build, **`main` only**. |
+| **Publish** | backend | Only after `Deploy` and `E2E tests` passed: uploads the exact JARs to Nexus `maven-releases` as `1.0.<build#>` and pushes the 8 images to `registry.ayoubnachti.dev/ecommerce/<svc>:1.0.<build#>` (user `ci-deployer`, credential `nexus-ci`). A failure here fails `Deliver` and rolls back. **`main` only**. |
 | *post (on Deliver)* | backend | Only once **both** `Deploy`'s health check **and** `E2E tests` passed: tag the release `last-good`. If either failed: redeploy `last-good` instead. Email on success and on failure. |
 
 Any failing stage stops the pipeline. Builds of the same branch or PR run one at a time.
@@ -85,7 +87,7 @@ Copied from *Sonar way*; conditions apply to **new code** (a PR's changes, or ch
 - **Branch protection on `main`:** changes only through a pull request; the Jenkins check `continuous-integration/jenkins/pr-head` must pass (tests + quality gate); the branch must be up to date with `main` (the PR head is what gets tested); conversations must be resolved; force pushes and deletion are blocked; **nobody can bypass these rules, admins included**.
 - **PR template** (`.github/pull_request_template.md`): the review checklist — green check, every SonarQube issue on the PR fixed or justified, hotspots reviewed, tests for new code, no secrets.
 - **Every issue is either fixed or justified in SonarQube:** *False positive* or *Accepted*, always with a comment explaining why.
-- **Approvals:** currently 0 required, because this is a solo project and GitHub never lets authors approve their own PR. Setting it to 1 is one checkbox in the branch protection rule once a second contributor exists.
+- **Approvals:** 1 required: each of the two team members reviews the other's PRs (GitHub never lets authors approve their own PR).
 
 ### Issues handled
 
@@ -148,6 +150,7 @@ ssh-keygen -t ed25519 -N "" -C jenkins-agent -f ~/.ssh/jenkins_agent
 #      SMTP_USERNAME / SMTP_APP_PASSWORD / NOTIFY_EMAIL  (Gmail app password)
 #      SONAR_DB_PASSWORD=$(openssl rand -hex 24)
 #      SONAR_TOKEN=placeholder    (replaced in step 4)
+#      NEXUS_CI_USER=ci-deployer / NEXUS_CI_PASSWORD   (Nexus CI user, becomes the nexus-ci credential)
 
 # 3. Start SonarQube first
 docker compose -f jenkins/docker-compose.yml up -d sonar-db sonarqube

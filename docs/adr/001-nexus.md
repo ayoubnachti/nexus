@@ -65,8 +65,19 @@ and CI use the same file. Every `mvnw` call in the Jenkinsfile passes `-s settin
 
 ### 6. Publishing in CI
 
-A new `Publish` stage is the last child of `Deliver`, after `E2E tests`:
-`mvnw deploy -DskipTests` for the 7 services, then `docker login`, tag and push the 8 images, `docker logout`.
+*Updated 2026-11-14 (both agreed): each JAR is built once, by Maven, and the image packages that JAR.*
+
+- `Build images` runs `mvnw -s settings.xml clean package -Drevision=1.0.<BUILD_NUMBER>` for the 7 services
+  (through Nexus), then `docker compose build`. The backend Dockerfiles no longer run Maven: they are a
+  single `eclipse-temurin:17-jre` stage that copies `target/*.jar`.
+- A new `Publish` stage is the last child of `Deliver`, after `E2E tests`: `deploy:deploy-file` uploads
+  those exact JARs with their flattened poms to `maven-releases`, then `docker login`, tag and push the
+  8 images as `registry.ayoubnachti.dev/ecommerce/<svc>:1.0.<BUILD_NUMBER>`, `docker logout`.
+
+Why: when the Dockerfiles built their own JAR, image builds downloaded from Maven Central (bypassing Nexus)
+and the image's JAR was a separate `0.0.0-SNAPSHOT` build, so image `1.0.N` did not contain JAR `1.0.N`.
+Now dependencies only come through Nexus, and the image holds the very file published as `1.0.N`.
+Cost: locally, `./scripts/build-jars.sh` must run before `docker compose up --build`.
 
 Being inside `Deliver` means: `main` only, never the nightly build, and only for releases that passed
 deploy and E2E. If publishing fails, the release counts as failed and `Deliver` rolls back to `last-good`.

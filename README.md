@@ -204,14 +204,18 @@ buy-01/
 
 ## Getting started
 
-**Prerequisites:** Docker and Docker Compose.
+**Prerequisites:** Docker and Docker Compose, JDK 17, and a Nexus account (the backend is built through Nexus).
 
 ```bash
 git clone https://github.com/ayoubnachti/buy-01.git
 cd buy-01
 cp .env.example .env   # fill in JWT_SECRET and CLOUDINARY_URL
+./scripts/build-jars.sh   # builds the backend JARs through Nexus (needs NEXUS_URL/USER/PASSWORD, see the script)
 docker compose up --build
 ```
+
+The backend images don't compile anything: they copy the JAR that Maven built (`target/*.jar`),
+so `build-jars.sh` must run again after any backend code change.
 
 This starts, in order: `mongodb` → `discovery-server` → the five backend services (`user-service`, `product-service`, `media-service`, `order-service`, `cart-service`) → `api-gateway` → `frontend`.
 

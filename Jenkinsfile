@@ -155,24 +155,39 @@ pipeline {
         beforeAgent true                     // check first, so PR and nightly builds don't take the backend agent
       }
       agent { label 'backend' }   // default for children below; E2E tests overrides it
+      environment {
+        VERSION  = "1.0.${BUILD_NUMBER}"              // the release version: JARs in maven-releases, images in docker-hosted
+        REGISTRY = 'registry.ayoubnachti.dev'
+      }
       stages {
         stage('Build images') {
           steps {
-            withCredentials([file(credentialsId: 'ecommerce-env', variable: 'APP_ENV')]) {
+            withCredentials([file(credentialsId: 'ecommerce-env', variable: 'APP_ENV'),
+                              usernamePassword(credentialsId: 'nexus-ci',
+                                              usernameVariable: 'NEXUS_USER',
+                                              passwordVariable: 'NEXUS_PASSWORD')]) {
               sh '''
                 set +x                           # don't echo commands: they contain the keystore password
                 set -a; . "$APP_ENV"; set +a     # load the app's settings (keystore password)
 
-                # The gateway's keystore is git-ignored and baked into its image
+                # The gateway's keystore is git-ignored and packaged into its JAR,
+                # so it must exist before Maven builds that JAR
                 KS=backend/api-gateway/src/main/resources/keystore.p12
                 rm -f "$KS"
                 keytool -genkeypair -noprompt -alias gateway -keyalg RSA -keysize 2048 \
                   -storetype PKCS12 -validity 3650 -keystore "$KS" -dname "CN=localhost" \
                   -storepass "$SSL_KEYSTORE_PASSWORD" -keypass "$SSL_KEYSTORE_PASSWORD"
 
+                # Build each JAR once, through Nexus, with the release version.
+                # The Dockerfiles only copy target/*.jar, so the image holds exactly this JAR,
+                # and Publish uploads the same file to maven-releases.
+                for svc in $BACKEND_SVCS; do
+                  echo "=== Packaging $svc $VERSION"
+                  (cd backend/$svc && ./mvnw -s ../../settings.xml -B -ntp clean package -DskipTests -Drevision=$VERSION)
+                done
+
                 $COMPOSE --env-file "$APP_ENV" build
               '''
-            }
           }
         }
 
@@ -218,6 +233,51 @@ pipeline {
             }
           }
         }
+
+        // Only a release that deployed healthy and passed E2E gets a version in Nexus.
+        // Back on the backend agent, in the workspace where Build images left the JARs.
+        // If Nexus refuses anything, Deliver fails and rolls back like any other failure.
+        stage('Publish') {
+          steps {
+            withCredentials([usernamePassword(credentialsId: 'nexus-ci',
+                                              usernameVariable: 'NEXUS_USER',
+                                              passwordVariable: 'NEXUS_PASSWORD')]) {
+              sh '''
+                # JARs: upload the exact files the images were built from (no rebuild),
+                # with the flattened pom, whose version is the real one (1.0.N, not ${revision})
+                for svc in $BACKEND_SVCS; do
+                  echo "=== Publishing $svc $VERSION to maven-releases"
+                  (cd backend/$svc && ./mvnw -s ../../settings.xml -B -ntp deploy:deploy-file \
+                    -Dfile="$(ls target/*.jar)" \
+                    -DpomFile=.flattened-pom.xml \
+                    -DrepositoryId=nexus-releases \
+                    -Durl="$NEXUS_URL/repository/maven-releases/")
+                done
+
+                # Images: a throwaway Docker config, so the registry login never stays on the agent
+                export DOCKER_CONFIG=$(mktemp -d)
+                trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+                echo "$NEXUS_PASSWORD" | docker login "$REGISTRY" -u "$NEXUS_USER" --password-stdin
+                for svc in $BACKEND_SVCS frontend; do
+                  echo "=== Pushing $REGISTRY/ecommerce/$svc:$VERSION"
+                  docker tag ecommerce/$svc:$TAG $REGISTRY/ecommerce/$svc:$VERSION
+                  docker push $REGISTRY/ecommerce/$svc:$VERSION
+                done
+                docker logout "$REGISTRY"
+              '''
+            }
+          }
+          post {
+            always {
+              // Drop the registry tags locally (the images stay as ecommerce/<svc>:<build#>).
+              // Untag by name only: removing by image id would also delete the deploy's tags.
+              sh '''
+                docker images "$REGISTRY/ecommerce/*" --format '{{.Repository}}:{{.Tag}}' \
+                  | xargs -r docker rmi
+              '''
+            }
+          }
+        }
       }
       post {
         // Runs on this stage's own agent (backend), regardless of which
@@ -259,7 +319,7 @@ pipeline {
         to: '$DEFAULT_RECIPIENTS',
         subject: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}" + (env.DEPLOYED ? ' deployed' : ' (tests and analysis passed)'),
         body: """Build #${env.BUILD_NUMBER} of ${env.BRANCH_NAME} passed all tests and quality gates.
-          ${env.DEPLOYED ? "Deployed. Running images: ecommerce/*:${env.TAG}" : 'Not deployed: only pushes to main deploy (PR builds and the nightly scan do not).'}
+                    ${env.DEPLOYED ? "Deployed and published as version 1.0.${env.BUILD_NUMBER} (JARs in maven-releases, images in registry.ayoubnachti.dev/ecommerce/*:1.0.${env.BUILD_NUMBER})." : 'Not deployed: only pushes to main deploy (PR builds and the nightly scan do not).'}
 
           Changes: ${env.BUILD_URL}changes
           Console: ${env.BUILD_URL}console
