@@ -188,6 +188,7 @@ pipeline {
 
                 $COMPOSE --env-file "$APP_ENV" build
               '''
+            }
           }
         }
 
